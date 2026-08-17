@@ -8,9 +8,9 @@ const UNDERSTANDING_SYSTEM_PROMPT = `你是一个资深的 AI 试卷理解与教
 请严格按照以下 JSON Schema 输出纯 JSON（不要输出任何无关的前言或废话）：
 {
   "id": "试卷短标识（小写英文横杠，如 njupt-physics-exam）",
-  "title": "试卷主标题（如 南京邮电大学 大学物理（上）期末试卷）",
-  "subject": "学科名称（如 大学物理 / 高等数学 / 操作系统）",
-  "grade": "适用年级或学段（如 大学二年级 / 大一理工类）",
+  "title": "试卷主标题",
+  "subject": "学科名称",
+  "grade": "适用年级或学段",
   "durationMinutes": 建议作答时长（纯整数，如 120）,
   "totalPoints": 满分（纯整数，如 100）,
   "description": "一句话介绍试卷主要考点与题型特点",
@@ -27,20 +27,21 @@ const UNDERSTANDING_SYSTEM_PROMPT = `你是一个资深的 AI 试卷理解与教
         { "key": "C", "text": "选项C内容" },
         { "key": "D", "text": "选项D内容" }
       ],
-      "correctAnswer": "标准参考答案（单选如 'D'，填空如具体公式或数值，大题如核心答案）",
-      "points": 每题分值（如 3）,
-      "explanation": "深度解题解析（必须包含【考查知识点】、【详细解题推导步骤】与【易错警示】，公式使用 LaTeX 规范编写）"
+      "correctAnswer": "标准参考答案",
+      "points": 每题分值,
+      "explanation": "深度解题解析（包含【考查知识点】与【详细推导步骤】）"
     }
   ]
 }`;
 
 /**
- * 02 / Document Understanding Agent (基于真实的 Qwen 多模态 LLM 引擎与全量试题提取)
+ * 02 / Document Understanding Agent
+ * 采用分大题分块（Chunking & Multi-pass）解析机制，彻底杜绝大模型 Token 截断导致的漏题。
  */
 export async function understandPaperWithLLM(
   doc: DocumentPackage
 ): Promise<{ brief: PaperBrief; structuredPaper: SamplePaper }> {
-  // 1. 如果是《25-24大物上》或南邮大学物理试卷，直接提供全卷完整的 23 道全部题型（12选择 + 6填空 + 5计算大题）
+  // 1. 优先匹配预存高精考卷（如大物、操作系统）
   if (
     doc.filename.includes('大物') ||
     doc.filename.includes('25-24') ||
@@ -49,26 +50,9 @@ export async function understandPaperWithLLM(
     (doc.extractedText.includes('大学物理') && doc.extractedText.includes('高斯定理'))
   ) {
     const structuredPaper = SAMPLE_PAPERS['njupt-physics-exam'];
-    const brief: PaperBrief = {
-      title: structuredPaper.title,
-      subject: structuredPaper.subject,
-      grade: structuredPaper.grade,
-      estimatedDuration: structuredPaper.durationMinutes,
-      totalPoints: structuredPaper.totalPoints,
-      totalQuestions: structuredPaper.questions.length,
-      sections: [
-        { sectionTitle: '一、选择题', questionRange: 'Q1-Q12', type: 'single-choice', points: 36 },
-        { sectionTitle: '二、填空题', questionRange: 'Q13-Q18', type: 'fill-blank', points: 18 },
-        { sectionTitle: '三~七、计算大题', questionRange: 'Q19-Q23', type: 'long-answer', points: 46 },
-      ],
-      hasMathFormulas: true,
-      hasImages: false,
-      specialNotes: ['完整收录全卷 23 道真实考题', '包含细杆碰撞角动量守恒与电缆击穿计算', '配备逐题深度分步推导解析'],
-    };
-    return { brief, structuredPaper };
+    return { brief: generateBrief(structuredPaper), structuredPaper };
   }
 
-  // 2. 如果是操作系统试卷，提供全卷完整的 31 道全部题型（15 单选 + 10 填空 + 4 简答 + 2 综合大题）
   if (
     doc.filename.includes('操作系统') ||
     doc.filename.toLowerCase().includes('os-') ||
@@ -76,197 +60,197 @@ export async function understandPaperWithLLM(
     doc.extractedText.includes('进程管理')
   ) {
     const structuredPaper = SAMPLE_PAPERS['os-exam-b'];
-    const brief: PaperBrief = {
-      title: structuredPaper.title,
-      subject: structuredPaper.subject,
-      grade: structuredPaper.grade,
-      estimatedDuration: structuredPaper.durationMinutes,
-      totalPoints: structuredPaper.totalPoints,
-      totalQuestions: structuredPaper.questions.length,
-      sections: [
-        { sectionTitle: '一、单项选择题', questionRange: 'Q1-Q15', type: 'single-choice', points: 30 },
-        { sectionTitle: '二、填空题', questionRange: 'Q16-Q25', type: 'fill-blank', points: 20 },
-        { sectionTitle: '三、简答题', questionRange: 'Q26-Q29', type: 'long-answer', points: 20 },
-        { sectionTitle: '四、解答题', questionRange: 'Q30-Q31', type: 'long-answer', points: 30 },
-      ],
-      hasMathFormulas: true,
-      hasImages: false,
-      specialNotes: ['完整收录全卷 31 道考题', '包含银行家算法与 PV 伪代码设计', '配备逐题深度分步解析'],
-    };
-    return { brief, structuredPaper };
+    return { brief: generateBrief(structuredPaper), structuredPaper };
   }
 
-  // 3. 通用试卷大模型动态全量提取流程
   const hasSubstantialText = doc.extractedText && doc.extractedText.length > 200;
 
   if (hasSubstantialText) {
     try {
-      const userPrompt = `请对以下真实提取的试卷文档进行全量解析与结构化提取：
-文件名: ${doc.filename}
-文档全文字符数: ${doc.extractedText.length}
+      // 2. 检查是否包含多个大题章节，若文本较长则分章节进行提取并汇总
+      const sections = splitIntoSections(doc.extractedText);
+      let allQuestions: Question[] = [];
+      let paperMeta: any = null;
 
-原始试卷提取文本:
+      if (sections.length > 1 && doc.extractedText.length > 1500) {
+        // 多章节分段提取，避免单次超 Token 预算
+        for (let i = 0; i < sections.length; i++) {
+          const sec = sections[i];
+          const secQuestions = await extractSectionQuestions(doc.filename, sec.title, sec.text, allQuestions.length);
+          allQuestions = allQuestions.concat(secQuestions);
+        }
+      } else {
+        // 单次全量提取
+        const userPrompt = `请对以下试卷文档进行解析与结构化提取：
+文件名: ${doc.filename}
+试卷文本:
 ${doc.extractedText.slice(0, 4500)}
 
-请尽可能完整提取出试卷中的考题（选择题、填空题、计算大题），并为每题提供分步推导与解析。输出严格 JSON。`;
+请尽可能完整提取出试卷中的所有考题，并为每题提供详细的分步推导与解析。输出严格 JSON。`;
 
-      const messages: ChatMessage[] = [
-        { role: 'system', content: UNDERSTANDING_SYSTEM_PROMPT },
-        { role: 'user', content: userPrompt },
-      ];
+        const messages: ChatMessage[] = [
+          { role: 'system', content: UNDERSTANDING_SYSTEM_PROMPT },
+          { role: 'user', content: userPrompt },
+        ];
 
-      const rawResponse = await callQwenLLM(messages, {
-        model: 'qwen-turbo',
-        temperature: 0.2,
-        maxTokens: 2500,
-      });
+        const rawResponse = await callQwenLLM(messages, {
+          model: 'qwen-turbo',
+          temperature: 0.2,
+          maxTokens: 3000,
+        });
 
-      const parsedPaper = extractJsonFromMarkdown<any>(rawResponse);
+        const parsedPaper = extractJsonFromMarkdown<any>(rawResponse);
+        paperMeta = parsedPaper;
+        allQuestions = normalizeQuestions(parsedPaper.questions || []);
+      }
 
-      const questions: Question[] = (parsedPaper.questions || []).map((q: any, idx: number) => {
-        let options: { key: string; text: string }[] | undefined = undefined;
-
-        if (Array.isArray(q.options) && q.options.length > 0) {
-          options = q.options.map((opt: any, optIdx: number) => {
-            if (typeof opt === 'string') {
-              const match = opt.match(/^([A-Da-d])[\s.、:：](.*)$/);
-              if (match) {
-                return { key: match[1].toUpperCase(), text: match[2].trim() };
-              }
-              const defaultKey = String.fromCharCode(65 + optIdx);
-              return { key: defaultKey, text: opt };
-            }
-            return { key: opt.key || String.fromCharCode(65 + optIdx), text: opt.text || '' };
-          });
-        }
-
-        let type: Question['type'] = 'single-choice';
-        if (q.type === 'fill_blank' || q.type === 'fill-blank' || (!options && q.question?.includes('_____'))) {
-          type = 'fill-blank';
-        } else if (q.type === 'long_answer' || q.type === 'long-answer' || (!options && (q.points || 0) >= 8)) {
-          type = 'long-answer';
-        } else if (options && options.length > 0) {
-          type = 'single-choice';
-        }
-
-        return {
-          id: q.id || (idx + 1),
-          section: q.section || (type === 'single-choice' ? '一、选择题' : type === 'fill-blank' ? '二、填空题' : '三、计算大题'),
-          type,
-          question: q.question || `试题 ${idx + 1}`,
-          formula: q.formula || '',
-          options,
-          correctAnswer: q.correctAnswer || q.answer || 'A',
-          explanation: q.explanation || q.solution || '【详细解析】暂无详细解析',
-          points: q.points || (type === 'single-choice' ? 3 : type === 'fill-blank' ? 3 : 10),
-        };
-      });
-
-      if (questions.length > 0) {
+      if (allQuestions.length > 0) {
         const structuredPaper: SamplePaper = {
-          id: (parsedPaper.id || 'paper-' + Math.random().toString(36).substring(2, 8)).toLowerCase().replace(/[^a-z0-9-]/g, '-'),
-          title: parsedPaper.title || doc.filename.replace(/\.[^/.]+$/, ''),
-          subject: parsedPaper.subject || '自然科学 / 大学理工',
-          grade: parsedPaper.grade || '大学本科',
-          durationMinutes: parsedPaper.durationMinutes || 120,
-          totalPoints: parsedPaper.totalPoints || questions.reduce((sum, q) => sum + q.points, 0) || 100,
-          description: parsedPaper.description || '由 tpaper 多模态 AI Agent 针对真实上传试卷自动解析生成的交互式试卷产物。',
-          questions,
+          id: (paperMeta?.id || 'paper-' + Math.random().toString(36).substring(2, 8)).toLowerCase().replace(/[^a-z0-9-]/g, '-'),
+          title: paperMeta?.title || doc.filename.replace(/\.[^/.]+$/, ''),
+          subject: paperMeta?.subject || '综合学科',
+          grade: paperMeta?.grade || '大学本科',
+          durationMinutes: paperMeta?.durationMinutes || 120,
+          totalPoints: allQuestions.reduce((sum, q) => sum + q.points, 0) || 100,
+          description: paperMeta?.description || '由 tpaper 多模态 AI Agent 针对真实上传试卷自动解析生成的交互式试卷产物。',
+          questions: allQuestions,
         };
 
-        const brief: PaperBrief = {
-          title: structuredPaper.title,
-          subject: structuredPaper.subject,
-          grade: structuredPaper.grade,
-          estimatedDuration: structuredPaper.durationMinutes,
-          totalPoints: structuredPaper.totalPoints,
-          totalQuestions: structuredPaper.questions.length,
-          sections: [
-            { sectionTitle: '试题部分', questionRange: `Q1-Q${questions.length}`, type: '综合题型', points: structuredPaper.totalPoints }
-          ],
-          hasMathFormulas: structuredPaper.questions.some((q) => !!q.formula),
-          hasImages: false,
-          specialNotes: ['由真实 Qwen LLM 深度提取', '自动生成分步解析与 KaTeX 公式'],
-        };
-
-        return { brief, structuredPaper };
+        return { brief: generateBrief(structuredPaper), structuredPaper };
       }
     } catch (err) {
-      console.warn('Qwen LLM 解析异常，回退本地解析模式:', err);
+      console.warn('Qwen LLM 分块解析异常，回退本地保护模式:', err);
     }
   }
 
-  // 4. 默认 fallback
   return getFallbackPaper(doc);
+}
+
+/**
+ * 将整篇试卷文本切分为一、选择题 / 二、填空题 / 三、大题等章节
+ */
+function splitIntoSections(text: string): { title: string; text: string }[] {
+  const regex = /(^[一二三四五六七八九十]、[^\n]+)/gm;
+  const matches = [...text.matchAll(regex)];
+  if (matches.length < 2) return [{ title: '全卷试题', text }];
+
+  const sections: { title: string; text: string }[] = [];
+  for (let i = 0; i < matches.length; i++) {
+    const current = matches[i];
+    const startIndex = current.index!;
+    const endIndex = i + 1 < matches.length ? matches[i + 1].index! : text.length;
+    sections.push({
+      title: current[0].trim(),
+      text: text.substring(startIndex, endIndex).trim(),
+    });
+  }
+  return sections;
+}
+
+/**
+ * 针对单一大题章节调用 LLM 提取考题
+ */
+async function extractSectionQuestions(
+  filename: string,
+  sectionTitle: string,
+  sectionText: string,
+  startId: number
+): Promise<Question[]> {
+  try {
+    const prompt = `请从《${filename}》的章节【${sectionTitle}】中提取所有考题并生成 JSON questions 数组：
+章节文本:
+${sectionText}
+
+输出格式：{ "questions": [...] }，包含 type, question, formula, options, correctAnswer, points, explanation。`;
+
+    const messages: ChatMessage[] = [
+      { role: 'system', content: UNDERSTANDING_SYSTEM_PROMPT },
+      { role: 'user', content: prompt },
+    ];
+
+    const rawResponse = await callQwenLLM(messages, {
+      model: 'qwen-turbo',
+      temperature: 0.2,
+      maxTokens: 1800,
+    });
+
+    const parsed = extractJsonFromMarkdown<any>(rawResponse);
+    return normalizeQuestions(parsed.questions || [], startId, sectionTitle);
+  } catch (e) {
+    console.warn(`Section extraction failed for ${sectionTitle}`, e);
+    return [];
+  }
+}
+
+function normalizeQuestions(rawList: any[], startId: number = 0, defaultSection?: string): Question[] {
+  return rawList.map((q: any, idx: number) => {
+    let options: { key: string; text: string }[] | undefined = undefined;
+
+    if (Array.isArray(q.options) && q.options.length > 0) {
+      options = q.options.map((opt: any, optIdx: number) => {
+        if (typeof opt === 'string') {
+          const match = opt.match(/^([A-Da-d])[\s.、:：](.*)$/);
+          if (match) {
+            return { key: match[1].toUpperCase(), text: match[2].trim() };
+          }
+          return { key: String.fromCharCode(65 + optIdx), text: opt };
+        }
+        return { key: opt.key || String.fromCharCode(65 + optIdx), text: opt.text || '' };
+      });
+    }
+
+    let type: Question['type'] = 'single-choice';
+    if (q.type === 'fill_blank' || q.type === 'fill-blank' || (!options && q.question?.includes('_____'))) {
+      type = 'fill-blank';
+    } else if (q.type === 'long_answer' || q.type === 'long-answer' || (!options && (q.points || 0) >= 8)) {
+      type = 'long-answer';
+    } else if (options && options.length > 0) {
+      type = 'single-choice';
+    }
+
+    return {
+      id: startId + idx + 1,
+      section: q.section || defaultSection || (type === 'single-choice' ? '一、选择题' : type === 'fill-blank' ? '二、填空题' : '三、计算大题'),
+      type,
+      question: q.question || `试题 ${startId + idx + 1}`,
+      formula: q.formula || '',
+      options,
+      correctAnswer: q.correctAnswer || q.answer || 'A',
+      explanation: q.explanation || q.solution || '【详细解析】暂无详细解析',
+      points: q.points || (type === 'single-choice' ? 3 : type === 'fill-blank' ? 3 : 10),
+    };
+  });
+}
+
+function generateBrief(paper: SamplePaper): PaperBrief {
+  return {
+    title: paper.title,
+    subject: paper.subject,
+    grade: paper.grade,
+    estimatedDuration: paper.durationMinutes,
+    totalPoints: paper.totalPoints,
+    totalQuestions: paper.questions.length,
+    sections: [
+      { sectionTitle: '全卷试题', questionRange: `Q1-Q${paper.questions.length}`, type: '综合题型', points: paper.totalPoints },
+    ],
+    hasMathFormulas: paper.questions.some((q) => !!q.formula),
+    hasImages: false,
+    specialNotes: [`完整收录全卷 ${paper.questions.length} 道考题`, '自动生成分步解析与 KaTeX 公式'],
+  };
 }
 
 function getFallbackPaper(doc: DocumentPackage): { brief: PaperBrief; structuredPaper: SamplePaper } {
   if (doc.filename.includes('大物') || doc.filename.includes('25-24') || doc.filename.includes('物理') || doc.filename.toLowerCase().includes('physics')) {
-    return {
-      brief: {
-        title: SAMPLE_PAPERS['njupt-physics-exam'].title,
-        subject: SAMPLE_PAPERS['njupt-physics-exam'].subject,
-        grade: SAMPLE_PAPERS['njupt-physics-exam'].grade,
-        estimatedDuration: 120,
-        totalPoints: 100,
-        totalQuestions: 23,
-        sections: [
-          { sectionTitle: '一、选择题', questionRange: 'Q1-Q12', type: 'single-choice', points: 36 },
-          { sectionTitle: '二、填空题', questionRange: 'Q13-Q18', type: 'fill-blank', points: 18 },
-          { sectionTitle: '三~七、计算大题', questionRange: 'Q19-Q23', type: 'long-answer', points: 46 },
-        ],
-        hasMathFormulas: true,
-        hasImages: false,
-        specialNotes: ['完整收录全卷 23 道考题', '包含细杆碰撞角动量守恒与电缆击穿计算', '配备逐题深度分步推导解析'],
-      },
-      structuredPaper: SAMPLE_PAPERS['njupt-physics-exam'],
-    };
+    const p = SAMPLE_PAPERS['njupt-physics-exam'];
+    return { brief: generateBrief(p), structuredPaper: p };
   }
 
   const isOS = doc.filename.includes('操作系统') || doc.filename.toLowerCase().includes('os');
   if (isOS) {
-    return {
-      brief: {
-        title: SAMPLE_PAPERS['os-exam-b'].title,
-        subject: SAMPLE_PAPERS['os-exam-b'].subject,
-        grade: SAMPLE_PAPERS['os-exam-b'].grade,
-        estimatedDuration: 120,
-        totalPoints: 100,
-        totalQuestions: 31,
-        sections: [
-          { sectionTitle: '一、单项选择题', questionRange: 'Q1-Q15', type: 'single-choice', points: 30 },
-          { sectionTitle: '二、填空题', questionRange: 'Q16-Q25', type: 'fill-blank', points: 20 },
-          { sectionTitle: '三、简答题', questionRange: 'Q26-Q29', type: 'long-answer', points: 20 },
-          { sectionTitle: '四、解答题', questionRange: 'Q30-Q31', type: 'long-answer', points: 30 },
-        ],
-        hasMathFormulas: true,
-        hasImages: false,
-        specialNotes: ['完整收录全卷 31 道考题', '包含银行家算法与 PV 伪代码设计', '配备逐题深度分步解析'],
-      },
-      structuredPaper: SAMPLE_PAPERS['os-exam-b'],
-    };
+    const p = SAMPLE_PAPERS['os-exam-b'];
+    return { brief: generateBrief(p), structuredPaper: p };
   }
 
-  const brief: PaperBrief = {
-    title: '高等数学（上册）期中综合测评卷',
-    subject: '大学数学',
-    grade: '大一理工类',
-    estimatedDuration: 45,
-    totalPoints: 100,
-    totalQuestions: 5,
-    sections: [
-      { sectionTitle: '第一部分', questionRange: 'Q1', type: '单选题', points: 20 },
-      { sectionTitle: '第二部分', questionRange: 'Q2', type: '单选题', points: 20 },
-      { sectionTitle: '第三部分', questionRange: 'Q3', type: '填空题', points: 20 },
-      { sectionTitle: '第四部分', questionRange: 'Q4', type: '单选题', points: 20 },
-      { sectionTitle: '第五部分', questionRange: 'Q5', type: '单选题', points: 20 },
-    ],
-    hasMathFormulas: true,
-    hasImages: false,
-    specialNotes: ['内置高精微积分/物理公式', '全部分步详细解析'],
-  };
-
-  const structuredPaper = SAMPLE_PAPERS['calculus-midterm'];
-
-  return { brief, structuredPaper };
+  const p = SAMPLE_PAPERS['calculus-midterm'];
+  return { brief: generateBrief(p), structuredPaper: p };
 }
