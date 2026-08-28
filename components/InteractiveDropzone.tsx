@@ -78,9 +78,13 @@ export function InteractiveDropzone({ onPaperReady }: InteractiveDropzoneProps) 
 
   const pollJobStatus = (jobId: string, fallbackId?: string) => {
     let attempts = 0;
+    let latestStatus = 'uploaded';
+    let requestInFlight = false;
     const maxAttempts = 60;
 
     const pollInterval = setInterval(async () => {
+      if (requestInFlight) return;
+      requestInFlight = true;
       attempts++;
       try {
         const statusRes = await fetch(`/api/papers/status/${jobId}`);
@@ -88,6 +92,7 @@ export function InteractiveDropzone({ onPaperReady }: InteractiveDropzoneProps) 
 
         if (statusData.success && statusData.job) {
           const currentStatus = statusData.job.status;
+          latestStatus = currentStatus;
           setProgressPercent(statusData.job.progressPercent || 50);
 
           if (currentStatus === 'parsing') setStep('uploading');
@@ -113,15 +118,15 @@ export function InteractiveDropzone({ onPaperReady }: InteractiveDropzoneProps) 
         }
       } catch (e) {
         // 继续轮询
+      } finally {
+        requestInFlight = false;
       }
 
       if (attempts >= maxAttempts) {
         clearInterval(pollInterval);
-        if (step !== 'ready') {
-          const resolvedId = fallbackId || 'calculus-midterm';
-          setActivePaperId(resolvedId);
-          setStep('ready');
-          setProgressPercent(100);
+        if (latestStatus !== 'ready' && latestStatus !== 'failed') {
+          setErrorMessage('生成任务处理超时，请稍后重试');
+          setStep('error');
         }
       }
     }, 800);

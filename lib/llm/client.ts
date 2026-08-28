@@ -24,6 +24,7 @@ export interface CompletionOptions {
   temperature?: number;
   maxTokens?: number;
   jsonMode?: boolean;
+  timeoutMs?: number;
 }
 
 const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
@@ -32,12 +33,16 @@ export async function callQwenLLM(
   messages: ChatMessage[],
   options: CompletionOptions = {}
 ): Promise<string> {
-  const apiKey = process.env.QWEN_API_KEY || 'sk-ws-H.EPHMEXP.XrRR.MEUCIClCADE3k2qoy-PI2GVvdsXp6BQuHrfYzexIqqGLF9eyAiEAhMMHs5E5MOdkc9s6wkuSxR8-ATBsZNBZ-Gcgpu8rTxY';
+  const apiKey = process.env.QWEN_API_KEY;
+  if (!apiKey) {
+    throw new Error('QWEN_API_KEY 未配置，无法调用 Qwen LLM');
+  }
   const baseUrl = process.env.QWEN_BASE_URL || DEFAULT_BASE_URL;
   const model = options.model || process.env.QWEN_MODEL || 'qwen-turbo';
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  const timeoutMs = options.timeoutMs ?? Number(process.env.QWEN_TIMEOUT_MS || 60000);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const res = await fetch(`${baseUrl}/chat/completions`, {
@@ -68,7 +73,7 @@ export async function callQwenLLM(
   } catch (err: any) {
     clearTimeout(timeoutId);
     if (err.name === 'AbortError') {
-      throw new Error('Qwen LLM API 请求超时 (60s)');
+      throw new Error(`Qwen LLM API 请求超时 (${Math.round(timeoutMs / 1000)}s)`);
     }
     throw err;
   }

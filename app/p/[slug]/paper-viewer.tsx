@@ -2,17 +2,22 @@
 
 import React from 'react';
 import Link from 'next/link';
-import { SAMPLE_PAPERS } from '@/lib/sample-papers';
+import { SamplePaper } from '@/lib/sample-papers';
 import { generateStandaloneTestHtml } from '@/lib/html-generator';
 import { ArrowLeft, Download } from 'lucide-react';
 
 interface PaperViewerProps {
   slug: string;
+  paper: SamplePaper;
 }
 
-export function PaperViewer({ slug }: PaperViewerProps) {
-  const paper = SAMPLE_PAPERS[slug] || SAMPLE_PAPERS['calculus-midterm'];
-  const htmlContent = generateStandaloneTestHtml(paper);
+export function PaperViewer({ slug, paper }: PaperViewerProps) {
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const htmlContent = generateStandaloneTestHtml(paper, {
+    gradingEndpoint: origin ? `${origin}/api/papers/grade` : undefined,
+    parentOrigin: origin,
+    logoSrc: '/tabbit-logo.jpg',
+  });
 
   const handleDownload = () => {
     const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
@@ -58,7 +63,7 @@ export function PaperViewer({ slug }: PaperViewerProps) {
         <iframe
           srcDoc={htmlContent}
           title={paper.title}
-          sandbox="allow-scripts allow-same-origin"
+          sandbox="allow-scripts"
           className="w-full h-full border-0"
         />
       </div>

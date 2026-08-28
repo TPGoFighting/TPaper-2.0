@@ -1,5 +1,6 @@
 import { DocumentPackage, PaperBrief } from './types';
-import { callQwenLLM, extractJsonFromMarkdown, ChatMessage } from '../llm/client';
+import { createFallbackPaperFromDoc } from './fallback-helper';
+import { callQwenLLM, extractJsonFromMarkdown, ChatMessage, MessageContent } from '../llm/client';
 import { SamplePaper, Question, SAMPLE_PAPERS } from '../sample-papers';
 
 const UNDERSTANDING_SYSTEM_PROMPT = `你是一个资深的 AI 试卷理解与教学专家 (tpaper Document Understanding Agent)。
@@ -29,7 +30,7 @@ const UNDERSTANDING_SYSTEM_PROMPT = `你是一个资深的 AI 试卷理解与教
       ],
       "correctAnswer": "标准参考答案",
       "points": 每题分值,
-      "explanation": "深度解题解析（包含【考查知识点】与【详细推导步骤】）"
+  "explanation": "详细解题解析（必须包含【考查知识点】【逐步推理】【常见错误】【结论】，选择题至少 120 字，计算/简答题至少 250 字）"
     }
   ]
 }`;
@@ -39,44 +40,40 @@ const UNDERSTANDING_SYSTEM_PROMPT = `你是一个资深的 AI 试卷理解与教
  * 采用分大题分块（Chunking & Multi-pass）解析机制，彻底杜绝大模型 Token 截断导致的漏题。
  */
 export async function understandPaperWithLLM(
-  doc: DocumentPackage
+  doc: DocumentPackage,
+  preferredPaperId?: string
 ): Promise<{ brief: PaperBrief; structuredPaper: SamplePaper }> {
-  // 1. 优先匹配预存高精考卷（如大物、操作系统）
-  if (
-    doc.filename.includes('大物') ||
-    doc.filename.includes('25-24') ||
-    doc.filename.includes('24-25') ||
-    doc.extractedText.includes('南京邮电大学') ||
-    (doc.extractedText.includes('大学物理') && doc.extractedText.includes('高斯定理'))
-  ) {
-    const structuredPaper = SAMPLE_PAPERS['njupt-physics-exam'];
+  // 样例体验必须显式指定，真实上传文件不能按文件名猜测试卷内容。
+  if (preferredPaperId && SAMPLE_PAPERS[preferredPaperId]) {
+    const structuredPaper = SAMPLE_PAPERS[preferredPaperId];
     return { brief: generateBrief(structuredPaper), structuredPaper };
   }
 
-  if (
-    doc.filename.includes('操作系统') ||
-    doc.filename.toLowerCase().includes('os-') ||
-    doc.extractedText.includes('操作系统') ||
-    doc.extractedText.includes('进程管理')
-  ) {
-    const structuredPaper = SAMPLE_PAPERS['os-exam-b'];
-    return { brief: generateBrief(structuredPaper), structuredPaper };
-  }
+  const sourceText = stripAnswerSection(doc.extractedText);
+  const hasSubstantialText = sourceText && sourceText.length > 10;
 
-  const hasSubstantialText = doc.extractedText && doc.extractedText.length > 200;
+  if (!hasSubstantialText && doc.pages.some((page) => page.imageUrl)) {
+    return understandPaperFromImages(doc);
+  }
 
   if (hasSubstantialText) {
     try {
       // 2. 检查是否包含多个大题章节，若文本较长则分章节进行提取并汇总
-      const sections = splitIntoSections(doc.extractedText);
+      const sections = splitIntoSections(sourceText);
       let allQuestions: Question[] = [];
       let paperMeta: any = null;
 
-      if (sections.length > 1 && doc.extractedText.length > 1500) {
+      if (sections.length > 1 && sourceText.length > 1500) {
         // 多章节分段提取，避免单次超 Token 预算
         for (let i = 0; i < sections.length; i++) {
           const sec = sections[i];
-          const secQuestions = await extractSectionQuestions(doc.filename, sec.title, sec.text, allQuestions.length);
+          const secQuestions = await extractSectionQuestions(
+            doc.filename,
+            sec.title,
+            sec.text,
+            allQuestions.length,
+            inferExpectedQuestionCount(sec.text)
+          );
           allQuestions = allQuestions.concat(secQuestions);
         }
       } else {
@@ -84,9 +81,9 @@ export async function understandPaperWithLLM(
         const userPrompt = `请对以下试卷文档进行解析与结构化提取：
 文件名: ${doc.filename}
 试卷文本:
-${doc.extractedText.slice(0, 4500)}
+${sourceText.slice(0, 4500)}
 
-请尽可能完整提取出试卷中的所有考题，并为每题提供详细的分步推导与解析。输出严格 JSON。`;
+请尽可能完整提取出试卷中的所有考题，并为每题生成可直接展示给学生的详细答案解析：必须包含考查知识点、逐步推理、常见错误和结论；选择题至少 120 字，计算/简答题至少 250 字。输出严格 JSON。`;
 
         const messages: ChatMessage[] = [
           { role: 'system', content: UNDERSTANDING_SYSTEM_PROMPT },
@@ -111,7 +108,7 @@ ${doc.extractedText.slice(0, 4500)}
           subject: paperMeta?.subject || '综合学科',
           grade: paperMeta?.grade || '大学本科',
           durationMinutes: paperMeta?.durationMinutes || 120,
-          totalPoints: allQuestions.reduce((sum, q) => sum + q.points, 0) || 100,
+          totalPoints: paperMeta?.totalPoints || inferTotalPoints(sourceText) || allQuestions.reduce((sum, q) => sum + q.points, 0) || 100,
           description: paperMeta?.description || '由 tpaper 多模态 AI Agent 针对真实上传试卷自动解析生成的交互式试卷产物。',
           questions: allQuestions,
         };
@@ -124,6 +121,87 @@ ${doc.extractedText.slice(0, 4500)}
   }
 
   return getFallbackPaper(doc);
+}
+
+async function understandPaperFromImages(
+  doc: DocumentPackage
+): Promise<{ brief: PaperBrief; structuredPaper: SamplePaper }> {
+  const imagePages = doc.pages.filter((page) => page.imageUrl);
+  const batchSize = Math.max(1, Number(process.env.QWEN_VISION_BATCH_SIZE || 2));
+  let allQuestions: Question[] = [];
+  let paperMeta: any = null;
+
+  for (let start = 0; start < imagePages.length; start += batchSize) {
+    const batch = imagePages.slice(start, start + batchSize);
+    const content: MessageContent = [
+      {
+        type: 'text',
+            text: `请识别《${doc.filename}》第 ${start + 1}-${start + batch.length} 页中的全部试题，忽略页眉水印和答案解析，只输出 JSON：{ "title": "", "subject": "", "grade": "", "durationMinutes": 120, "totalPoints": 100, "description": "", "questions": [...] }。每道题必须包含 type, question, formula, options, correctAnswer, points, explanation。explanation 必须包含考查知识点、逐步推理、常见错误和结论；选择题至少 120 字，计算/简答题至少 250 字。`,
+      },
+      ...batch.map((page) => ({
+        type: 'image_url' as const,
+        image_url: { url: page.imageUrl! },
+      })),
+    ];
+
+    const rawResponse = await callQwenLLM([
+      { role: 'system', content: UNDERSTANDING_SYSTEM_PROMPT },
+      { role: 'user', content },
+    ], {
+      model: process.env.QWEN_VISION_MODEL || 'qwen-vl-max',
+      temperature: 0.2,
+      maxTokens: 3500,
+      timeoutMs: Number(process.env.QWEN_VISION_TIMEOUT_MS || 90000),
+    });
+
+    const parsed = extractJsonFromMarkdown<any>(rawResponse);
+    paperMeta ||= parsed;
+    allQuestions = allQuestions.concat(normalizeQuestions(parsed.questions || [], allQuestions.length));
+  }
+
+  if (allQuestions.length === 0) {
+    return getFallbackPaper(doc);
+  }
+
+  const structuredPaper: SamplePaper = {
+    id: (paperMeta?.id || 'paper-' + Math.random().toString(36).substring(2, 8)).toLowerCase().replace(/[^a-z0-9-]/g, '-'),
+    title: paperMeta?.title || doc.filename.replace(/\.[^/.]+$/, ''),
+    subject: paperMeta?.subject || '综合学科',
+    grade: paperMeta?.grade || '大学本科',
+    durationMinutes: paperMeta?.durationMinutes || 120,
+    totalPoints: paperMeta?.totalPoints || allQuestions.reduce((sum, q) => sum + q.points, 0) || 100,
+    description: paperMeta?.description || '由 tpaper 视觉 OCR Agent 针对扫描试卷生成的交互式试卷产物。',
+    questions: allQuestions,
+  };
+
+  return { brief: generateBrief(structuredPaper), structuredPaper };
+}
+
+/** 删除答案/详细解答附录，避免模型把答案编号再次识别成题目。 */
+export function stripAnswerSection(text: string): string {
+  const markers = ['参考答案', '详细解答', '答案解析', '答案与解析'];
+  const candidates = markers
+    .map((marker) => text.indexOf(marker, 500))
+    .filter((index) => index >= 0);
+  if (candidates.length === 0) return text;
+  return text.slice(0, Math.min(...candidates)).trim();
+}
+
+function inferExpectedQuestionCount(sectionText: string): number | undefined {
+  const byPerQuestionScore = sectionText.match(/每(?:小题|题|空)\s*(\d+)\s*分[，,]\s*共\s*(\d+)\s*分/);
+  if (byPerQuestionScore) {
+    const perQuestion = Number(byPerQuestionScore[1]);
+    const total = Number(byPerQuestionScore[2]);
+    if (perQuestion > 0 && total > 0 && total % perQuestion === 0) return total / perQuestion;
+  }
+
+  const explicitCount = sectionText.match(/共\s*(\d+)\s*小题/);
+  return explicitCount ? Number(explicitCount[1]) : undefined;
+}
+
+function inferTotalPoints(sourceText: string): number | undefined {
+  const match = sourceText.match(/(?:满分|总分)\s*[：:]?\s*(\d+)\s*分/);
+  return match ? Number(match[1]) : undefined;
 }
 
 /**
@@ -154,14 +232,16 @@ async function extractSectionQuestions(
   filename: string,
   sectionTitle: string,
   sectionText: string,
-  startId: number
+  startId: number,
+  expectedQuestionCount?: number
 ): Promise<Question[]> {
   try {
     const prompt = `请从《${filename}》的章节【${sectionTitle}】中提取所有考题并生成 JSON questions 数组：
 章节文本:
 ${sectionText}
 
-输出格式：{ "questions": [...] }，包含 type, question, formula, options, correctAnswer, points, explanation。`;
+输出格式：{ "questions": [...] }，包含 type, question, formula, options, correctAnswer, points, explanation。每道 explanation 必须包含考查知识点、逐步推理、常见错误和结论；选择题至少 120 字，计算/简答题至少 250 字。
+${expectedQuestionCount ? `本章节按原卷分值应有 ${expectedQuestionCount} 道题，必须逐题完整输出；不要把答案解析中的编号识别为新题。` : '只输出原卷题目，不要把答案解析中的编号识别为新题。'}`;
 
     const messages: ChatMessage[] = [
       { role: 'system', content: UNDERSTANDING_SYSTEM_PROMPT },
@@ -171,7 +251,7 @@ ${sectionText}
     const rawResponse = await callQwenLLM(messages, {
       model: 'qwen-turbo',
       temperature: 0.2,
-      maxTokens: 1800,
+      maxTokens: 5000,
     });
 
     const parsed = extractJsonFromMarkdown<any>(rawResponse);
@@ -216,10 +296,22 @@ function normalizeQuestions(rawList: any[], startId: number = 0, defaultSection?
       formula: q.formula || '',
       options,
       correctAnswer: q.correctAnswer || q.answer || 'A',
-      explanation: q.explanation || q.solution || '【详细解析】暂无详细解析',
+      explanation: normalizeExplanation(q.explanation || q.solution || '【详细解析】暂无详细解析'),
       points: q.points || (type === 'single-choice' ? 3 : type === 'fill-blank' ? 3 : 10),
     };
   });
+}
+
+function normalizeExplanation(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(normalizeExplanation).join('、');
+  if (typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, item]) => `${key}：${normalizeExplanation(item)}`)
+      .join('\n');
+  }
+  return String(value);
 }
 
 function generateBrief(paper: SamplePaper): PaperBrief {
@@ -240,17 +332,6 @@ function generateBrief(paper: SamplePaper): PaperBrief {
 }
 
 function getFallbackPaper(doc: DocumentPackage): { brief: PaperBrief; structuredPaper: SamplePaper } {
-  if (doc.filename.includes('大物') || doc.filename.includes('25-24') || doc.filename.includes('物理') || doc.filename.toLowerCase().includes('physics')) {
-    const p = SAMPLE_PAPERS['njupt-physics-exam'];
-    return { brief: generateBrief(p), structuredPaper: p };
-  }
-
-  const isOS = doc.filename.includes('操作系统') || doc.filename.toLowerCase().includes('os');
-  if (isOS) {
-    const p = SAMPLE_PAPERS['os-exam-b'];
-    return { brief: generateBrief(p), structuredPaper: p };
-  }
-
-  const p = SAMPLE_PAPERS['calculus-midterm'];
-  return { brief: generateBrief(p), structuredPaper: p };
+  const structuredPaper = createFallbackPaperFromDoc(doc);
+  return { brief: generateBrief(structuredPaper), structuredPaper };
 }

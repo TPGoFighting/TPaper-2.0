@@ -18,7 +18,7 @@ export function getPaperById(id: string): SamplePaper | undefined {
   return dynamicPapersStore.get(id) || SAMPLE_PAPERS[id];
 }
 
-export function createJob(fileName: string, rawContent?: any): GenerationJob {
+export function createJob(fileName: string, rawContent?: any, requestedPaperId?: string): GenerationJob {
   const id = 'job_' + Math.random().toString(36).substring(2, 9);
   const now = Date.now();
   const job: GenerationJob = {
@@ -39,6 +39,7 @@ export function createJob(fileName: string, rawContent?: any): GenerationJob {
     ],
   };
   (job as any).rawContent = rawContent;
+  job.requestedPaperId = requestedPaperId;
   jobsStore.set(id, job);
   return job;
 }
@@ -81,7 +82,7 @@ export async function runGenerationPipeline(jobId: string): Promise<GenerationJo
 
     // 步骤 2: Qwen LLM 理解试卷
     updateJobStep(job, 'understanding', 'Qwen LLM 试卷深度理解', '多模态大模型深度提取题目、LaTeX 公式与分步推导解析...', 50);
-    const { brief, structuredPaper } = await understandPaperWithLLM(docPkg);
+    const { brief, structuredPaper } = await understandPaperWithLLM(docPkg, job.requestedPaperId);
     job.brief = brief;
     (job as any).paperId = structuredPaper.id;
 

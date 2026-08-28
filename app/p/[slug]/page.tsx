@@ -1,9 +1,10 @@
 import { Metadata } from 'next';
-import { SAMPLE_PAPERS } from '@/lib/sample-papers';
+import { notFound } from 'next/navigation';
+import { resolvePublishedPaper } from '@/lib/paper-resolver';
 import { PaperViewer } from './paper-viewer';
 
 export function generateStaticParams() {
-  return Object.keys(SAMPLE_PAPERS).map((slug) => ({ slug }));
+  return [];
 }
 
 export async function generateMetadata({
@@ -12,7 +13,10 @@ export async function generateMetadata({
   params: Promise<{ slug: string }>;
 }): Promise<Metadata> {
   const { slug } = await params;
-  const paper = SAMPLE_PAPERS[slug] || SAMPLE_PAPERS['os-exam-b'] || SAMPLE_PAPERS['calculus-midterm'];
+  const paper = resolvePublishedPaper(slug);
+  if (!paper) {
+    return { title: '试卷未找到 — tpaper' };
+  }
   return {
     title: `${paper.title} — tpaper 交互式试卷`,
     description: paper.description,
@@ -25,5 +29,7 @@ export default async function PublishedPaperPage({
   params: Promise<{ slug: string }>;
 }) {
   const { slug } = await params;
-  return <PaperViewer slug={slug} />;
+  const paper = resolvePublishedPaper(slug);
+  if (!paper) notFound();
+  return <PaperViewer slug={slug} paper={paper} />;
 }

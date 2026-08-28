@@ -71,6 +71,7 @@ export interface GenerationJob {
   status: JobStatus;
   progressPercent: number;
   fileName: string;
+  requestedPaperId?: string;
   brief?: PaperBrief;
   experiencePlan?: ExperiencePlan;
   htmlArtifact?: string;

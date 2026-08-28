@@ -1,5 +1,15 @@
 import { DocumentPackage } from './types';
-import { extractText } from 'unpdf';
+
+interface PdfParser {
+  getText: (options?: Record<string, unknown>) => Promise<{
+    text: string;
+    pages: Array<{ text: string }>;
+  }>;
+  getScreenshot: (options: Record<string, unknown>) => Promise<{
+    pages: Array<{ pageNumber: number; dataUrl?: string }>;
+  }>;
+  destroy: () => Promise<void>;
+}
 
 /**
  * 01 / Document Intake Agent
@@ -8,7 +18,7 @@ import { extractText } from 'unpdf';
 export async function intakeDocument(
   filename: string,
   rawContent?: string | Buffer | Uint8Array,
-  fileSizeBytes: number = 1024 * 50
+  fileSizeBytes: number = 0
 ): Promise<DocumentPackage> {
   const extension = filename.split('.').pop()?.toLowerCase() || 'pdf';
   let sourceType: DocumentPackage['sourceType'] = 'pdf';
@@ -22,6 +32,10 @@ export async function intakeDocument(
   }
 
   let extractedText = '';
+  let pageTexts: string[] = [];
+  let totalPages = 0;
+  let pdfBytes: Uint8Array | undefined;
+  let pdfParser: PdfParser | undefined;
 
   // 针对 PDF 二进制文件使用 unpdf 提取全部页面的真实文本
   if (extension === 'pdf' && rawContent && typeof rawContent !== 'string') {
@@ -34,39 +48,74 @@ export async function intakeDocument(
       } else {
         uint8 = new Uint8Array(rawContent as any);
       }
+      pdfBytes = uint8;
 
-      const res = await extractText(uint8);
-      if (res && res.text) {
-        extractedText = Array.isArray(res.text) ? res.text.join('\n') : String(res.text);
-      }
+      const { PDFParse } = await import(/* webpackIgnore: true */ 'pdf-parse');
+      pdfParser = new PDFParse({ data: Buffer.from(uint8) }) as PdfParser;
+      const res = await pdfParser.getText({ pageJoiner: '\n' });
+      totalPages = res.pages.length;
+      pageTexts = res.pages.map((page) => page.text || '');
+      extractedText = res.text || pageTexts.join('\n');
     } catch (err) {
       console.warn('unpdf 解析异常:', err);
     }
   }
 
-  if (!extractedText) {
-    if (typeof rawContent === 'string' && rawContent.length > 0) {
-      extractedText = rawContent;
-    } else {
-      extractedText = `试卷文档: ${filename}\n包含选择题、填空题、计算大题与详细解析。`;
-    }
+  if (!extractedText && typeof rawContent === 'string' && rawContent.length > 0) {
+    extractedText = rawContent;
+    pageTexts = [rawContent];
+    totalPages = 1;
   }
+
+  if (totalPages === 0) totalPages = pageTexts.length || 1;
+  if (pageTexts.length === 0) pageTexts = Array.from({ length: totalPages }, () => '');
+
+  const resolvedFileSizeBytes = fileSizeBytes || (
+    typeof rawContent === 'string' ? Buffer.byteLength(rawContent, 'utf8') : rawContent?.byteLength || 0
+  );
+  const meaningfulTextLength = extractedText.replace(/\s+/g, '').length;
+  const hasMeaningfulText = meaningfulTextLength >= 100;
+  const isScanned = sourceType === 'image' || (sourceType === 'pdf' && !hasMeaningfulText);
+
+  const pages: DocumentPackage['pages'] = pageTexts.map((text, index) => ({
+    pageNumber: index + 1,
+    text: text.slice(0, 4000),
+  }));
+
+  if (isScanned && sourceType === 'pdf' && pdfBytes) {
+    try {
+      if (!pdfParser) {
+        const { PDFParse } = await import(/* webpackIgnore: true */ 'pdf-parse');
+        pdfParser = new PDFParse({ data: Buffer.from(pdfBytes) }) as PdfParser;
+      }
+      const screenshots = await pdfParser.getScreenshot({ desiredWidth: 768, imageDataUrl: true, imageBuffer: false });
+      for (const screenshot of screenshots.pages) {
+        if (screenshot.dataUrl && pages[screenshot.pageNumber - 1]) {
+          pages[screenshot.pageNumber - 1].imageUrl = screenshot.dataUrl;
+        }
+      }
+    } catch (err) {
+      console.warn('PDF 页面渲染异常，无法进入视觉 OCR:', err);
+    }
+  } else if (isScanned && sourceType === 'image' && rawContent && typeof rawContent !== 'string') {
+    const bytes = Buffer.from(rawContent as Uint8Array);
+    pages[0].imageUrl = `data:image/${extension === 'jpg' ? 'jpeg' : extension};base64,${bytes.toString('base64')}`;
+  }
+
+  await pdfParser?.destroy();
 
   return {
     filename,
     sourceType,
-    fileSizeBytes,
+    fileSizeBytes: resolvedFileSizeBytes,
     extractedText,
-    pages: [
-      {
-        pageNumber: 1,
-        text: extractedText.slice(0, 4000),
-      }
-    ],
+    pages,
     metadata: {
       parsedAt: Date.now(),
       extension,
-      isScanned: sourceType === 'image',
+      totalPages,
+      isScanned,
+      extractionStatus: isScanned ? 'ocr-required' : 'text-extracted',
       charCount: extractedText.length,
     }
   };

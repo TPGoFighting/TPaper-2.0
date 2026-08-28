@@ -4,7 +4,7 @@ import { SAMPLE_PAPERS } from '@/lib/sample-papers';
 import { generateStandaloneTestHtml } from '@/lib/html-generator';
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
@@ -17,7 +17,12 @@ export async function GET(
     );
   }
 
-  const html = generateStandaloneTestHtml(paper);
+  const origin = new URL(req.url).origin;
+  const html = generateStandaloneTestHtml(paper, {
+    gradingEndpoint: `${origin}/api/papers/grade`,
+    parentOrigin: origin,
+    logoSrc: '/tabbit-logo.jpg',
+  });
 
   return NextResponse.json({
     success: true,

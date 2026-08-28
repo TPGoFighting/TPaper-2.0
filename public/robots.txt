@@ -1,0 +1,15 @@
+User-agent: *
+Allow: /
+Content-Signal: search=yes,ai-input=yes,ai-train=no,use=reference
+
+User-agent: GPTBot
+Allow: /
+User-agent: OAI-SearchBot
+Allow: /
+User-agent: Claude-SearchBot
+Allow: /
+User-agent: PerplexityBot
+Allow: /
+User-agent: Google-Extended
+Allow: /
+Sitemap: https://tpaper.tpgofighting.top/sitemap.xml

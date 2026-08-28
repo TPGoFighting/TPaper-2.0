@@ -6,12 +6,13 @@ export async function POST(req: Request) {
     const formData = await req.formData();
     const file = formData.get('file') as File | null;
     const textContent = (formData.get('text') as string) || '';
+    const customFileName = (formData.get('fileName') as string) || '';
 
-    let fileName = '试卷文档.pdf';
+    let fileName = customFileName || (textContent ? '试卷题目.txt' : '试卷文档.pdf');
     let rawContent: string | Buffer = textContent;
 
     if (file) {
-      fileName = file.name;
+      fileName = file.name || customFileName || '试卷文档.pdf';
       if (file.type.includes('text') || fileName.endsWith('.txt') || fileName.endsWith('.md')) {
         rawContent = await file.text();
       } else {

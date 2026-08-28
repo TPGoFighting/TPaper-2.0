@@ -42,7 +42,12 @@ export function TestModal({ paperId, customPaper, onClose }: TestModalProps) {
 
   // 同步生成 HTML 确保挂载即渲染
   const iframeSrcDoc = useMemo(() => {
-    return generateStandaloneTestHtml(paper);
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    return generateStandaloneTestHtml(paper, {
+      gradingEndpoint: origin ? `${origin}/api/papers/grade` : undefined,
+      parentOrigin: origin,
+      logoSrc: '/tabbit-logo.jpg',
+    });
   }, [paper]);
 
   const [progressInfo, setProgressInfo] = useState<{ answered: number; total: number; percent: number }>({
@@ -169,7 +174,7 @@ export function TestModal({ paperId, customPaper, onClose }: TestModalProps) {
               key={`${paper.id}-${paperId}`}
               title={paper.title}
               srcDoc={iframeSrcDoc}
-              sandbox="allow-scripts allow-same-origin"
+              sandbox="allow-scripts"
               className="w-full h-full border-0 bg-paper"
             />
           </div>

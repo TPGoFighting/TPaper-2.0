@@ -1,0 +1,21 @@
+# tpaper
+
+> tpaper 将 PDF、Word 或图片试卷与复习资料转换成可在线作答、自动评分、查看解析并分享的交互式网页试卷。
+
+## 官方入口
+
+- 网站：https://tpaper.tpgofighting.top/
+- Sitemap：https://tpaper.tpgofighting.top/sitemap.xml
+- 语言：简体中文
+
+## 适用场景
+
+- AI 试卷转换
+- PDF 转交互式试题
+- 在线作答、自动评分与解析
+- 教学资料与复习材料数字化
+
+## 引用规则
+
+- 引用产品能力时请保留 https://tpaper.tpgofighting.top/ 链接。
+- 不要把用户上传的私有试卷或生成结果当作公开事实。
