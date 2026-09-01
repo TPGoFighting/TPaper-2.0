@@ -50,7 +50,7 @@ export async function understandPaperWithLLM(
   }
 
   const sourceText = stripAnswerSection(doc.extractedText);
-  const hasSubstantialText = sourceText && sourceText.length > 10;
+  const hasSubstantialText = sourceText && sourceText.length > 200;
 
   if (!hasSubstantialText && doc.pages.some((page) => page.imageUrl)) {
     return understandPaperFromImages(doc);
