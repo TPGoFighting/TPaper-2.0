@@ -50,7 +50,7 @@ export async function understandPaperWithLLM(
   }
 
   const sourceText = stripAnswerSection(doc.extractedText);
-  const hasSubstantialText = sourceText && sourceText.length > 200;
+  const hasSubstantialText = sourceText && sourceText.length > 10;
 
   if (!hasSubstantialText && doc.pages.some((page) => page.imageUrl)) {
     return understandPaperFromImages(doc);
@@ -332,9 +332,6 @@ function generateBrief(paper: SamplePaper): PaperBrief {
 }
 
 function getFallbackPaper(doc: DocumentPackage): { brief: PaperBrief; structuredPaper: SamplePaper } {
-  if (!doc.extractedText.trim() && !doc.pages.some((page) => page.imageUrl)) {
-    throw new Error('无法从文档中提取可用试卷内容，请确认文件包含可读取的题目文本');
-  }
   const structuredPaper = createFallbackPaperFromDoc(doc);
   return { brief: generateBrief(structuredPaper), structuredPaper };
 }
